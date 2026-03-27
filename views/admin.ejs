@@ -1,0 +1,36 @@
+<body style="font-family:sans-serif; padding:20px; text-align:right;" dir="rtl">
+    <h1>🛠️ إدارة طلبات b5 Store</h1>
+    <table border="1" style="width:100%; text-align:center; border-collapse:collapse;">
+        <tr style="background:#333; color:white;">
+            <th>المنتج</th>
+            <th>الزبون</th>
+            <th>التحويل</th>
+            <th>حساب الزبون</th>
+            <th>الحالة</th>
+            <th>إجراء</th>
+        </tr>
+        <% orders.forEach(o=> { %>
+            <tr>
+                <td>
+                    <%= o.productName %>
+                </td>
+                <td>
+                    <%= o.customerDiscord %>
+                </td>
+                <td><a href="/uploads/<%= o.transferImg %>" target="_blank">🖼️ عرض</a></td>
+                <td><a href="/uploads/<%= o.accountImg %>" target="_blank">🖼️ عرض</a></td>
+                <td><b>
+                        <%= o.status %>
+                    </b></td>
+                <td>
+                    <% if (o.status !=='تم التسليم ✅' ) { %>
+                        <form action="/admin/approve/<%= o.id %>" method="POST">
+                            <button type="submit" style="background:green; color:white; padding:5px; cursor:pointer;">✅
+                                قبول وإرسال الرابط</button>
+                        </form>
+                        <% } %>
+                </td>
+            </tr>
+            <% }) %>
+    </table>
+</body>
