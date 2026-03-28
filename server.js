@@ -1,82 +1,130 @@
 const express = require('express');
-const fs = require('fs');
+const session = require('express-session');
+const passport = require('passport');
+const DiscordStrategy = require('passport-discord').Strategy;
 const multer = require('multer');
 const path = require('path');
-const axios = require('axios'); // المكتبة اللي ثبتناها
+const fs = require('fs');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
 const app = express();
+const PORT = 8080;
 
-// --- إعدادات الويبهوك (حط رابطك هنا) ---
-const DISCORD_WEBHOOK_URL = 'رابط_الويبهوك_الخاص_بك';
+// --- 1. إعدادات متجر b5 والبوت ---
+const CLIENT_ID = '1487185802386735266';
+const CLIENT_SECRET = 'KuJLAUlUpqfZDdDJMD9KXAnXJkGN8iqW';
+const CALLBACK_URL = 'http://localhost:8080/auth/discord/callback';
+const BOT_TOKEN = 'MTQ4NzE4NTgwMjM4NjczNTI2Ng.Gzk-47.c0bFcxuRhV_iAsnsahiBqiHzkk87D6bbBw573w';
+const LOG_CHANNEL_ID = '1487179938762199070';
 
+const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages]
+});
+client.login(BOT_TOKEN);
+
+// --- 2. إعدادات الملفات والرفع ---
+app.use(express.static(__dirname));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.set('view engine', 'ejs');
 app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static('uploads'));
 
-// إعدادات رفع الصور
 const storage = multer.diskStorage({
-    destination: './uploads/',
-    filename: (req, file, cb) => {
-        cb(null, 'b5-' + Date.now() + path.extname(file.originalname));
-    }
+    destination: 'uploads/',
+    filename: (req, file, cb) => { cb(null, Date.now() + '-' + file.originalname); }
 });
 const upload = multer({ storage: storage });
+const uploadFields = upload.fields([{ name: 'img1', maxCount: 1 }, { name: 'img2', maxCount: 1 }]);
 
-const DATA_FILE = './products.json';
-const ORDERS_FILE = './orders.json';
+if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
 
-// إنشاء ملفات البيانات لو مو موجودة
-if (!fs.existsSync(ORDERS_FILE)) fs.writeFileSync(ORDERS_FILE, '[]');
+// --- 3. نظام الجلسات والدخول ---
+app.use(session({ secret: 'b5-secure-key', resave: false, saveUninitialized: false }));
+app.use(passport.initialize());
+app.use(passport.session());
 
-function getProducts() { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8')); }
-function getOrders() { return JSON.parse(fs.readFileSync(ORDERS_FILE, 'utf-8')); }
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((obj, done) => done(null, obj));
 
-// الويب الأول (المتجر للزبائن)
+passport.use(new DiscordStrategy({
+    clientID: CLIENT_ID, clientSecret: CLIENT_SECRET, callbackURL: CALLBACK_URL, scope: ['identify']
+}, (at, rt, profile, done) => done(null, profile)));
+
+// --- 4. المسارات (Routes) ---
 app.get('/', (req, res) => {
-    res.render('index', { products: getProducts() });
+    try {
+        const products = JSON.parse(fs.readFileSync('products.json', 'utf-8'));
+        res.render('index', { products, user: req.user });
+    } catch (e) { res.send("تأكد من وجود ملف products.json"); }
 });
 
-// استقبال الطلب
-app.post('/order', upload.fields([{ name: 'img1' }, { name: 'img2' }]), (req, res) => {
-    const orders = getOrders();
-    const newOrder = {
-        id: Date.now(),
-        productName: req.body.productName,
-        customerDiscord: req.body.discordName,
-        transferImg: req.files['img1'][0].filename,
-        accountImg: req.files['img2'][0].filename,
-        status: 'قيد الانتظار ⏳',
-        date: new Date().toLocaleString('ar-SA')
-    };
-    orders.push(newOrder);
-    fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2));
-    res.send('<h1 style="text-align:center;">✅ تم استلام طلبك بنجاح! سيتم مراجعته وإرسال الرابط لك في الديسكورد.</h1>');
-});
+app.get('/auth/discord', passport.authenticate('discord'));
+app.get('/auth/discord/callback', passport.authenticate('discord', { failureRedirect: '/' }), (req, res) => res.redirect('/'));
 
-// الويب الثاني (لوحة التحكم)
-app.get('/admin', (req, res) => {
-    res.render('admin', { products: getProducts(), orders: getOrders() });
-});
+// إرسال الطلب مع الأزرار والصور
+app.post('/order', uploadFields, async (req, res) => {
+    if (!req.isAuthenticated()) return res.send("<h1>سجل دخول أولاً!</h1>");
 
-// زر القبول وإرسال المنتج عبر الويبهوك
-app.post('/admin/approve/:id', async (req, res) => {
-    let orders = getOrders();
-    let products = getProducts();
-    const order = orders.find(o => o.id == req.params.id);
+    try {
+        const channel = await client.channels.fetch(LOG_CHANNEL_ID);
+        const img1 = req.files['img1'] ? req.files['img1'][0].path : null;
+        const img2 = req.files['img2'] ? req.files['img2'][0].path : null;
+        const pName = req.body.productName || "منتج غير معروف";
 
-    if (order && order.status !== 'تم التسليم ✅') {
-        const prod = products.find(p => p.name === order.productName);
-        if (prod) {
-            try {
-                // إرسال الرسالة للديسكورد
-                await axios.post(DISCORD_WEBHOOK_URL, {
-                    content: `📦 **طلب جديد مقبول لمتجر b5**\n👤 **الزبون:** ${order.customerDiscord}\n🛒 **المنتج:** ${prod.name}\n🔗 **رابط التحميل:** ${prod.link}\n\nشكراً لتعاملك مع b5 Store!`
-                });
-                order.status = 'تم التسليم ✅';
-                fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2));
-            } catch (err) { console.log("خطأ في الويبهوك"); }
-        }
+        const embed = new EmbedBuilder()
+            .setTitle('🔵 طلب شراء جديد - b5 Store')
+            .setColor(0x2cc9ff)
+            .addFields(
+                { name: '👤 العميل', value: `<@${req.user.id}>`, inline: true },
+                { name: '📦 المنتج', value: pName, inline: true }
+            )
+            .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`approve_${req.user.id}_${pName.replace(/\s+/g, '-')}`)
+                .setLabel('قبول ✅')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId('reject_order')
+                .setLabel('رفض ❌')
+                .setStyle(ButtonStyle.Danger)
+        );
+
+        await channel.send({ embeds: [embed], components: [row], files: [img1, img2].filter(Boolean) });
+        res.send("<h1 style='text-align:center; color:#2cc9ff; margin-top:50px;'>✅ تم إرسال طلبك بنجاح!</h1>");
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("خطأ في السيرفر.");
     }
-    res.redirect('/admin');
 });
 
-app.listen(3000, () => console.log('🚀 متجر b5 شغال: http://localhost:3000'));
+// --- 5. معالج الأزرار الذكي ---
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isButton()) return;
+
+    if (interaction.customId.startsWith('approve_')) {
+        // الرد الفوري لمنع رسالة "Interaction Failed"
+        await interaction.deferReply({ ephemeral: true });
+
+        const parts = interaction.customId.split('_');
+        const userId = parts[1];
+        const pName = parts[2].replace(/-/g, ' ');
+
+        try {
+            const products = JSON.parse(fs.readFileSync('products.json', 'utf-8'));
+            const product = products.find(p => p.name === pName);
+            const link = product ? product.download : "الرابط غير متاح";
+
+            const user = await client.users.fetch(userId);
+            await user.send(`✅ **متجر b5**\nتم قبول طلبك لـ: **${pName}**\n🔗 الرابط: ${link}`);
+
+            await interaction.editReply({ content: `✅ تم إرسال الرابط لـ <@${userId}>` });
+        } catch (e) {
+            await interaction.editReply({ content: `❌ فشل الإرسال (الخاص مقفل).` });
+        }
+    } else if (interaction.customId === 'reject_order') {
+        await interaction.reply({ content: '❌ تم رفض الطلب.', ephemeral: true });
+    }
+});
+
+app.listen(PORT, () => console.log(`🚀 السيرفر شغال: http://localhost:${PORT}`));
